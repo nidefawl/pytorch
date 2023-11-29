@@ -245,6 +245,8 @@ class ViewAndMutationMeta:
     # to reset the grad mode to its pre-graph value prior to calling aot_autograd.
     grad_enabled_mutation: Optional[bool] = None
 
+    deterministic: Optional[bool] = None
+
     def __post_init__(self):
         # pre-compute the indices of the inputs that are mutated.
         # When keep_input_mutations is set, we don't need to worry about our epilogue
