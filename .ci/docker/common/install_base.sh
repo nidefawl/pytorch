@@ -76,6 +76,7 @@ install_ubuntu() {
     vim \
     unzip \
     gpg-agent \
+    numactl \
     gdb
 
   # Should resolve issues related to various apt package repository cert issues
@@ -122,6 +123,7 @@ install_centos() {
     wget \
     vim \
     unzip \
+    numactl \
     gdb
 
   # Cleanup

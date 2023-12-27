@@ -537,27 +537,32 @@ test_inductor_torchbench_cpu_smoketest_perf(){
   mkdir -p "$TEST_REPORTS_DIR"
 
   #set jemalloc
-  export LD_PRELOAD=$(dirname $(which python))/../lib/libjemalloc.so
+  local JEMALLOC_LIB="$(dirname $(which python))/../lib/libjemalloc.so"
+  export LD_PRELOAD="$JEMALLOC_LIB"
   export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
+  export KMP_AFFINITY=granularity=fine,compact,1,0
+  export KMP_BLOCKTIME=1
+  local CORES=$(lscpu | grep Core | awk '{print $4}')
+  export OMP_NUM_THREADS=$CORES
+  local end_core=$(( $CORES-1 ))
 
   MODELS_SPEEDUP_TARGET=benchmarks/dynamo/expected_ci_speedup_inductor_torchbench_cpu.csv
-  
-  for line in $(awk 'NR>1' $MODELS_SPEEDUP_TARGET)
-  do
-    line=$(echo ${line} | tr "," " ")
-    model_cfg=($line)
-    model_name=${model_cfg[0]}
-    data_type=${model_cfg[1]}
-    speedup_target=${model_cfg[4]}
-    if [[ ${model_cfg[2]} == "dynamic" ]]; then shape_extra="--dynamic-shapes --dynamic-batch-only "; else shape_extra=""; fi
-    if [[ ${model_cfg[3]} == "cpp" ]]; then wrapper_extra="--cpp-wrapper "; else wrapper_extra=""; fi
-    output_name="$TEST_REPORTS_DIR/inductor_inference_${model_cfg[0]}_${model_cfg[1]}_${model_cfg[2]}_${model_cfg[3]}_cpu_smoketest.csv"
 
-    python -m torch.backends.xeon.run_cpu --enable-jemalloc --node_id 0 benchmarks/dynamo/torchbench.py \
-      --inference --performance --$data_type -dcpu -n50 --only $model_name $shape_extra $wrapper_extra \
-      --freezing --timeout 9000 --backend=inductor --output $output_name
+  grep -v '^ *#' < "$MODELS_SPEEDUP_TARGET" | while IFS=',' read -r -a model_cfg
+  do
+    local model_name=${model_cfg[0]}
+    local data_type=${model_cfg[1]}
+    local speedup_target=${model_cfg[4]}
+    local model_args="$model_name"
+    if [[ ${model_cfg[2]} == "dynamic" ]]; then model_args+=" --dynamic-shapes --dynamic-batch-only"; fi
+    if [[ ${model_cfg[3]} == "cpp" ]]; then model_args+=" --cpp-wrapper"; fi
+    local output_name="$TEST_REPORTS_DIR/inductor_inference_${model_cfg[0]}_${model_cfg[1]}_${model_cfg[2]}_${model_cfg[3]}_cpu_smoketest.csv"
+
+    numactl -C 0-"$end_core" -m 0 python benchmarks/dynamo/torchbench.py \
+      --inference --performance --"$data_type" -dcpu -n50 --only "$model_args" \
+      --freezing --timeout 9000 --backend=inductor --output "$output_name"
     # The threshold value needs to be actively maintained to make this check useful.
-    python benchmarks/dynamo/check_perf_csv.py -f $output_name -t $speedup_target
+    python benchmarks/dynamo/check_perf_csv.py -f "$output_name" -t "$speedup_target"
   done
 }
 
