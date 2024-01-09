@@ -63,7 +63,7 @@ if [ -n "$ANACONDA_PYTHON_VERSION" ]; then
   conda_install llvmdev=8.0.0 "libpython-static=${ANACONDA_PYTHON_VERSION}"
 
   # Install jemalloc for CPU performance test
-  conda_install jemalloc=5.2.1
+  conda_install jemalloc=5.2.1 intel-openmp=2021.4.0
 
   # Use conda cmake in some cases. Conda cmake will be newer than our supported
   # min version (3.5 for xenial and 3.10 for bionic), so we only do it in those
