@@ -2,6 +2,7 @@ import functools
 import itertools
 import logging
 import operator
+import traceback
 from collections import Counter, defaultdict, namedtuple
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -46,6 +47,7 @@ from ..pattern_matcher import (
 from ..utils import decode_device, is_pointwise_use
 from ..virtualized import V
 from .group_batch_fusion import group_batch_fusion_passes
+from .numeric_utils import run_model
 
 log = logging.getLogger(__name__)
 aten = torch.ops.aten
@@ -61,7 +63,7 @@ pass_patterns = [
 inference_patterns = PatternMatcherPass()
 
 
-def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
+def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool, example_inputs):
     """
     Passes that run on after grad.  This is called once on the forwards
     graph and once on the backwards graph.
@@ -82,17 +84,38 @@ def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
 
     if config.pattern_matcher:
         lazy_init()
-
+        if config.runtime_numeric_check["enable"]:
+            pre_optimus = gm.__copy__()
         print_graph(gm.graph, "Before group batch fusion in post grad pass.")
         group_batch_fusion_passes(gm.graph, pre_grad=False)
         print_graph(gm.graph, "After group batch fusion in post grad pass.")
+        if config.runtime_numeric_check["enable"]:
+            # need to topo-sort graphmodule before we run the model,
+            # otherwise it may fail as refer before def
+            stable_topological_sort(gm.graph)
+            post_optimus = gm.__copy__()
+            # fail silently in order not to block the model run
+            try:
+                with V.fake_mode:
+                    run_model(
+                        pre_optimus,
+                        post_optimus,
+                        example_inputs,
+                        num_iteration=config.runtime_numeric_check["num_iterations"],
+                        precision=config.runtime_numeric_check["precision"],
+                    )
+            except Exception as e:
+                log.warning(
+                    f"Runtime numeric check failed in post grad pass with error: {e}. "
+                    "Please check the error message for more details."
+                )
+                traceback.print_exc()
         remove_noop_ops(gm.graph)
-        print_graph(gm.graph, "Before split cat in post grad pass.")
         for patterns in pass_patterns:
             patterns.apply(gm.graph)
             print_graph(
                 gm.graph,
-                "Apply split cat pattern matcher PatternMatcherPass in post grad.",
+                "Apply pattern matcher PatternMatcherPass in post grad.",
             )
         if is_inference:
             inference_patterns.apply(gm.graph)

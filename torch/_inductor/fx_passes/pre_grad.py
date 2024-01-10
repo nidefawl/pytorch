@@ -1,5 +1,6 @@
 import copy
 import logging
+import traceback
 from typing import List, Optional
 
 import torch
@@ -25,6 +26,7 @@ from ..pattern_matcher import (
 from ..utils import is_cpu_device
 from .group_batch_fusion import group_batch_fusion_passes
 from .misc_patterns import numpy_compat_normalization
+from .numeric_utils import run_model
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +71,8 @@ def pre_grad_passes(gm: torch.fx.GraphModule, example_inputs):
 
     if config.pattern_matcher:
         lazy_init()
+        if config.runtime_numeric_check["enable"]:
+            pre_optimus = gm.__copy__()
         # explicitly run with predispatch atenIR based passes
         if config.is_predispatch:
             group_batch_fusion_passes(gm.graph, pre_grad=True)
@@ -92,6 +96,25 @@ def pre_grad_passes(gm: torch.fx.GraphModule, example_inputs):
     gm.graph.lint()
     gm.recompile()
 
+    # need to topo-sort graphmodule before we run the model,
+    # otherwise it may fail as refer before def
+    if config.pattern_matcher and config.runtime_numeric_check["enable"]:
+        post_optimus = gm.__copy__()
+        # fail silently in order not to block the model run
+        try:
+            run_model(
+                pre_optimus,
+                post_optimus,
+                example_inputs,
+                num_iteration=config.runtime_numeric_check["num_iterations"],
+                precision=config.runtime_numeric_check["precision"],
+            )
+        except Exception as e:
+            log.warning(
+                f"Runtime numeric check failed in pre grad pass with error: {e}. "
+                "Please check the error message for more details."
+            )
+            traceback.print_exc()
     print_graph(gm.graph, "After recompile in pre grad pass.")
 
     return gm
