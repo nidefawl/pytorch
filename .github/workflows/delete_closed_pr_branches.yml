@@ -15,90 +15,21 @@ jobs:
     runs-on: linux.large.arc
 
     steps:
-      - uses: actions/github-script@v6
+      - name: Checkout repo
+        uses: actions/checkout@v3
         with:
-          script: |
-            // Do some dumb retries on requests.
-            // Copied from stale.yml
-            const retries = 7;
-            const baseBackoff = 100;
-            const sleep = timeout => new Promise(resolve => setTimeout(resolve, timeout));
-            github.hook.wrap('request', async (request, options) => {
-              for (let attempt = 1; attempt <= retries; attempt++) {
-                try {
-                  return await request(options);
-                } catch (err) {
-                  if (attempt < retries) {
-                    core.warning(`Request getting retried. Attempt: ${attempt}`);
-                    await sleep(baseBackoff * Math.pow(2, attempt));
-                    continue;
-                  }
-                  throw err;
-                }
-              }
-            });
+          fetch-depth: 0
 
-            const MAX_API_REQUESTS = 100;
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+          architecture: x64
+          check-latest: false
+          cache: pip
+          cache-dependency-path: |
+            **/.ci/docker/requirements-ci.txt
+            **/.github/requirements-gha-cache.txt
 
-            // Delete after 7 days
-            const TIME_CLOSED_THRESHOLD = 1000 * 60 * 60 * 24 * 7;
-
-            let numAPIRequests = 0;
-            let numProcessed = 0;
-
-            async function processPull(pull) {
-              core.info(`[${pull.number}] URL: ${pull.html_url}`);
-              numProcessed += 1;
-              const labels = pull.labels.map((label) => label.name);
-              const branch = pull.head.ref;
-              const body = pull.body;
-
-              // Skip if certain labels are present.
-              if (body && body.includes("no-delete-branch")) {
-                core.info(`[${pull.number}] Skipping because PR body has magic string.`);
-                return false;
-              }
-
-              const millisSinceLastUpdated =
-                new Date().getTime() - new Date(pull.updated_at).getTime();
-
-              if (millisSinceLastUpdated < TIME_CLOSED_THRESHOLD) {
-                core.info(`[${pull.number}] Skipping because PR was updated recently`);
-                return false;
-              }
-
-              core.info(`[${pull.number}] Deleting branch`);
-              numAPIRequests += 1;
-              // await github.rest.git.deleteRef({
-              //   owner: "pytorch",
-              //   repo: "pytorch",
-              //   ref: `heads/${branch}`,
-              // });
-            }
-
-            for await (const response of github.paginate.iterator(
-              github.rest.pulls.list,
-              {
-                owner: "pytorch",
-                repo: "pytorch",
-                state: "closed",
-                sort: "updated",
-                direction: "desc",
-                per_page: 100,
-              }
-            )) {
-              numAPIRequests += 1;
-              const pulls = response.data;
-              // Awaiting in a loop is intentional here. We want to serialize execution so
-              // that log groups are printed correctl
-              for (const pull of pulls) {
-                if (numAPIRequests > MAX_API_REQUESTS) {
-                  core.warning("Max API requests exceeded, exiting.");
-                  process.exit(0);
-                }
-                await core.group(`Processing PR #${pull.number}`, async () => {
-                  await processPull(pull);
-                });
-              }
-            }
-            core.info(`Processed ${numProcessed} PRs total.`);
+      - name: Delete old branches
+        run: python .github/scripts/delete_old_branches.py
