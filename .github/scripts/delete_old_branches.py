@@ -11,10 +11,11 @@ from typing import Any, Dict, List
 SEC_IN_DAY = 24 * 60 * 60
 CLOSED_PR_RETENTION = 30 * SEC_IN_DAY
 NO_PR_RETENTION = (365 + 180) * SEC_IN_DAY
+PR_WINDOW = 90 * SEC_IN_DAY  # Set to None to look at all PRs (may take a lot of tokens)
 REPO_OWNER = "pytorch"
 REPO_NAME = "pytorch"
-PR_WINDOW = 90 * SEC_IN_DAY  # Set to None to look at all PRs (may take a lot of tokens)
 PR_BODY_MAGIC_STRING = "do-not-delete-branch"
+ESTIMATED_TOKENS = [0]
 
 TOKEN = os.environ["GITHUB_TOKEN"]
 if not TOKEN:
@@ -47,48 +48,10 @@ query ($owner: String!, $repo: String!, $cursor: String) {
 }
 """
 
-GRAPHQL_BRANCH_PROTECTION_RULES = """
-query ($owner: String!, $repo: String!) {
-  repository(owner: $owner, name: $repo) {
-    branchProtectionRules(first: 100) {
-      pageInfo {
-        hasNextPage
-      }
-      nodes {
-        matchingRefs(first: 100) {
-          pageInfo {
-            hasNextPage
-          }
-          nodes {
-            name
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-def get_protected_branches():
-    res = gh_graphql(
-        GRAPHQL_BRANCH_PROTECTION_RULES,
-        owner="pytorch",
-        repo="pytorch",
-    )
-    if res['data']["repository"]['branchProtectionRules']['pageInfo']['hasNextPage']:
-        raise Exception("Too many branch protection rules")
-
-    rules = res['data']["repository"]["branchProtectionRules"]["nodes"]
-    branches = []
-    for rule in rules:
-        if rule['matchingRefs']['pageInfo']['hasNextPage']:
-            raise Exception("Too many branches")
-        branches.extend([x['name'] for x in rule['matchingRefs']['nodes']])
-    return branches
-
 
 def is_protected(branch):
-    res = gh_fetch_json_dict(f"repos/{REPO_OWNER}/{REPO_NAME}/branches/{branch}")
+    ESTIMATED_TOKENS[0] += 1
+    res = gh_fetch_json_dict(f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/branches/{branch}")
     return res['protected']
 
 def convert_gh_timestamp(date):
@@ -96,21 +59,21 @@ def convert_gh_timestamp(date):
 
 
 def get_branches(repo):
-    # Query locally for branches
+    # Query locally for branches, group by branch base name (e.g. gh/blah/base -> gh/blah), and get the most recent branch
     git_response = repo._run_git("for-each-ref", "--sort=creatordate" , "--format=%(refname) %(committerdate:iso-strict)", "refs/remotes/origin")
     branches_by_base_name = {}
     for line in git_response.splitlines():
         branch, date = line.split(" ")
-        branch = base_branch = re.match(r"refs/remotes/origin/(.*)", branch).group(1)
+        branch = branch_base_name = re.match(r"refs/remotes/origin/(.*)", branch).group(1)
         date = datetime.fromisoformat(date).timestamp()
         if x := re.match(r"(gh\/.+)\/(head|base|orig)", branch):
-            base_branch = x.group(1)
-        if base_branch not in branches_by_base_name:
-            branches_by_base_name[base_branch] = [date, [branch]]
+            branch_base_name = x.group(1)
+        if branch_base_name not in branches_by_base_name:
+            branches_by_base_name[branch_base_name] = [date, [branch]]
         else:
-            branches_by_base_name[base_branch][1].append(branch)
-            if date > branches_by_base_name[base_branch][0]:
-                branches_by_base_name[base_branch][0] = date
+            branches_by_base_name[branch_base_name][1].append(branch)
+            if date > branches_by_base_name[branch_base_name][0]:
+                branches_by_base_name[branch_base_name][0] = date
     return branches_by_base_name
 
 
@@ -122,6 +85,7 @@ def get_prs():
     hasNextPage = True
     endCursor = None
     while hasNextPage:
+        ESTIMATED_TOKENS[0] += 1
         res = gh_graphql(
             GRAPHQL_PRS_QUERY,
             owner="pytorch",
@@ -135,18 +99,20 @@ def get_prs():
         if PR_WINDOW and now - convert_gh_timestamp(pr_infos[-1]["updatedAt"]) > PR_WINDOW:
             break
 
-    prs_by_branch = {}
+
+    # Get the most recent PR for each branch base (group gh together)
+    prs_by_branch_base = {}
     for pr in pr_infos:
         pr['updatedAt'] = convert_gh_timestamp(pr['updatedAt'])
-        head_branch = pr['headRefName']
-        if x := re.match(r"(gh\/.+)\/(head|base|orig)", head_branch):
-            head_branch = x.group(1)
-        if pr['headRefName'] not in prs_by_branch:
-            prs_by_branch[pr['headRefName']] = pr
+        branch_base_name = pr['headRefName']
+        if x := re.match(r"(gh\/.+)\/(head|base|orig)", branch_base_name):
+            branch_base_name = x.group(1)
+        if branch_base_name not in prs_by_branch_base:
+            prs_by_branch_base[branch_base_name] = pr
         else:
-            if pr['updatedAt'] > prs_by_branch[pr['headRefName']]['updatedAt']:
-                prs_by_branch[pr['headRefName']] = pr
-    return prs_by_branch
+            if pr['updatedAt'] > prs_by_branch_base[branch_base_name]['updatedAt']:
+                prs_by_branch_base[branch_base_name] = pr
+    return prs_by_branch_base
 
 
 def delete_branch(repo, branch):
@@ -160,7 +126,6 @@ def delete_branches():
         f.write(json.dumps(prs_by_branch, indent=2))
     with open("t.txt") as f:
         prs_by_branch = json.load(f)
-    protected_branches = get_protected_branches()
 
     delete = []
     # Do not delete if:
@@ -170,19 +135,29 @@ def delete_branches():
     for branch, (date, sub_branches) in branches.items():
         if pr := prs_by_branch.get(branch):
             if pr['state'] == "OPEN":
+                print(f"{branch} has open pr {pr['number']}")
                 continue
             if pr['state'] == "CLOSED" and now - pr['updatedAt'] < CLOSED_PR_RETENTION:
+                print(f"{branch} has closed pr {pr['number']} ({pr['state']}, updated {pr['updatedAt'] / SEC_IN_DAY} days ago)")
                 continue
             if PR_BODY_MAGIC_STRING in pr['body']:
+                print(f"{branch} has pr {pr['number']} with magic string")
                 continue
-            print(f"[{branch}] has pr {pr['number']} ({pr['state']}, updated {pr['updatedAt'] / SEC_IN_DAY} days ago)")
         elif now - date < NO_PR_RETENTION:
+            print(f"{branch} has no pr and was updated {date / SEC_IN_DAY} days ago")
             continue
-        elif any(sub_branch in protected_branches for sub_branch in sub_branches):
+        elif any(is_protected(sub_branch) for sub_branch in sub_branches):
+            print(f"{branch} is protected")
             continue
         for sub_branch in sub_branches:
-            print(f"[{branch}] Deleting {sub_branch}")
             delete.append(sub_branch)
+        if ESTIMATED_TOKENS[0] > 400:
+            print("Estimated tokens exceeded, exiting")
+            break
+
+    print("To delete:")
+    for branch in delete:
+        print(branch)
 
     print(len(delete))
 
