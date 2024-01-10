@@ -121,9 +121,9 @@ def delete_branch(repo, branch):
 def delete_branches():
     now = datetime.now().timestamp()
     branches = get_branches(GitRepo(REPO_ROOT, "origin", debug=True))
-    # prs_by_branch = get_prs()
-    # with open("t.txt", "w") as f:
-    #     f.write(json.dumps(prs_by_branch, indent=2))
+    prs_by_branch = get_prs()
+    with open("t.txt", "w") as f:
+        f.write(json.dumps(prs_by_branch, indent=2))
     with open("t.txt") as f:
         prs_by_branch = json.load(f)
 
