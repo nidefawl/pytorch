@@ -1615,6 +1615,14 @@ class TritonKernel(Kernel):
         if not self.inside_reduction:
             self.outside_loop_vars.add(value)
 
+    def vectorized_random(self, seed, mode):
+        assert mode in ("rand", "randn")
+        prefix = [tree.prefix for tree in self.range_trees if tree.prefix != "r" or self.inside_reduction]
+        block_size = " * ".join([dense + " // 4" for dense in self.dense_size_list()])
+        offsets = [f"{p}offset" for p in prefix]
+        offsets_size = " * ".join(offsets)
+        return f"triton_helpers.vectorized_{mode}({seed}, {offsets_size}, {block_size})"
+
     def bucketize(
         self,
         values: CSEVariable,

@@ -139,6 +139,26 @@ def randint64(seed, offset, low, high):
 
 
 @triton.jit
+def vectorized_rand(seed, offset, block):
+    t0 = offset + tl.arange(0, block)[:]
+    r0, r1, r2, r3 = tl.rand4x(seed, t0)
+    r4 = tl.cat(r0, r1, can_reorder=True)
+    r5 = tl.cat(r2, r3, can_reorder=True)
+    result = tl.cat(r4, r5, can_reorder=True)
+    return result
+
+
+@triton.jit
+def vectorized_randn(seed, offset, block):
+    t0 = offset + tl.arange(0, block)[:]
+    r0, r1, r2, r3 = tl.randn4x(seed, t0)
+    r4 = tl.cat(r0, r1, can_reorder=True)
+    r5 = tl.cat(r2, r3, can_reorder=True)
+    result = tl.cat(r4, r5, can_reorder=True)
+    return result
+
+
+@triton.jit
 def _any_combine(a, b):
     return a | b
 
