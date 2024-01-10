@@ -1,6 +1,6 @@
 # A workflow that deletes branches of closed PRs
 
-name: Close stale pull requests
+name: Delete closed PR branches
 
 on:
   schedule:
@@ -10,7 +10,7 @@ on:
   pull_request:
 
 jobs:
-  stale:
+  delete:
     if: ${{ github.repository == 'pytorch/pytorch' }}
     runs-on: linux.large.arc
 
@@ -68,11 +68,11 @@ jobs:
 
               core.info(`[${pull.number}] Deleting branch`);
               numAPIRequests += 1;
-              # await github.rest.git.deleteRef({
-              #   owner: "pytorch",
-              #   repo: "pytorch",
-              #   ref: `heads/${branch}`,
-              # });
+              // await github.rest.git.deleteRef({
+              //   owner: "pytorch",
+              //   repo: "pytorch",
+              //   ref: `heads/${branch}`,
+              // });
             }
 
             for await (const response of github.paginate.iterator(
