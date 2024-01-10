@@ -19,6 +19,7 @@ jobs:
         with:
           script: |
             // Do some dumb retries on requests.
+            // Copied from stale.yml
             const retries = 7;
             const baseBackoff = 100;
             const sleep = timeout => new Promise(resolve => setTimeout(resolve, timeout));
@@ -81,8 +82,8 @@ jobs:
                 owner: "pytorch",
                 repo: "pytorch",
                 state: "closed",
-                sort: "updated_at",
-                direction: "asc",
+                sort: "updated",
+                direction: "desc",
                 per_page: 100,
               }
             )) {
