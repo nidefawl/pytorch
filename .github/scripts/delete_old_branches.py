@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 SEC_IN_DAY = 24 * 60 * 60
 CLOSED_PR_RETENTION = 30 * SEC_IN_DAY
-NO_PR_RETENTION = (365 + 180) * SEC_IN_DAY
+NO_PR_RETENTION = 1.5 * 365 * SEC_IN_DAY
 PR_WINDOW = 90 * SEC_IN_DAY  # Set to None to look at all PRs (may take a lot of tokens)
 REPO_OWNER = "pytorch"
 REPO_NAME = "pytorch"
@@ -121,9 +121,9 @@ def delete_branch(repo, branch):
 def delete_branches():
     now = datetime.now().timestamp()
     branches = get_branches(GitRepo(REPO_ROOT, "origin", debug=True))
-    prs_by_branch = get_prs()
-    with open("t.txt", "w") as f:
-        f.write(json.dumps(prs_by_branch, indent=2))
+    # prs_by_branch = get_prs()
+    # with open("t.txt", "w") as f:
+    #     f.write(json.dumps(prs_by_branch, indent=2))
     with open("t.txt") as f:
         prs_by_branch = json.load(f)
 
@@ -132,22 +132,18 @@ def delete_branches():
     # * associated PR is open, closed but updated recently, or contains the magic string
     # * no associated PR and branch was updated in last 1.5 years
     # * is protected
-    for branch, (date, sub_branches) in branches.items():
+    for branch, (date, sub_branches) in reversed(branches.items()):
         if pr := prs_by_branch.get(branch):
             if pr['state'] == "OPEN":
-                print(f"{branch} has open pr {pr['number']}")
                 continue
             if pr['state'] == "CLOSED" and now - pr['updatedAt'] < CLOSED_PR_RETENTION:
-                print(f"{branch} has closed pr {pr['number']} ({pr['state']}, updated {pr['updatedAt'] / SEC_IN_DAY} days ago)")
                 continue
             if PR_BODY_MAGIC_STRING in pr['body']:
-                print(f"{branch} has pr {pr['number']} with magic string")
                 continue
         elif now - date < NO_PR_RETENTION:
-            print(f"{branch} has no pr and was updated {date / SEC_IN_DAY} days ago")
             continue
         elif any(is_protected(sub_branch) for sub_branch in sub_branches):
-            print(f"{branch} is protected")
+            print([is_protected(sub_branch) for sub_branch in sub_branches])
             continue
         for sub_branch in sub_branches:
             delete.append(sub_branch)
