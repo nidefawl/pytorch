@@ -142,8 +142,7 @@ def delete_branches():
                 continue
         elif now - date < NO_PR_RETENTION:
             continue
-        elif any(is_protected(sub_branch) for sub_branch in sub_branches):
-            print([is_protected(sub_branch) for sub_branch in sub_branches])
+        if any(is_protected(sub_branch) for sub_branch in sub_branches):
             continue
         for sub_branch in sub_branches:
             delete.append(sub_branch)
