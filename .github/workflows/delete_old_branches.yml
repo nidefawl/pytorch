@@ -9,6 +9,9 @@ on:
   workflow_dispatch:
   pull_request:
 
+concurrency:
+  group: delete-branches
+
 permissions: "read-all"
 
 jobs:
