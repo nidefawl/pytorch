@@ -230,6 +230,7 @@ docs/source/scripts/quantization_backend_configs/
 
 # build, distribute, and bins (+ python proto bindings)
 build/
+build*/
 # Allow tools/build/ for build support.
 !tools/build/
 build_host_protoc
