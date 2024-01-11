@@ -10,7 +10,7 @@ on:
   pull_request:
 
 concurrency:
-  group: delete-branches
+  group: delete-old-branches
 
 permissions: "read-all"
 
