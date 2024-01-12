@@ -225,12 +225,19 @@ class InputToTensorConstantSpec:
     tensor_constant_name: str
 
 
+@dataclass
+class InputToCustomObjSpec:
+    arg: CustomObjArgument
+    custom_obj_name: str
+
+
 @dataclass(repr=False)
 class InputSpec(_Union):
     user_input: UserInputSpec
     parameter: InputToParameterSpec
     buffer: InputToBufferSpec
     tensor_constant: InputToTensorConstantSpec
+    custom_obj: InputToCustomObjSpec
 
 
 @dataclass

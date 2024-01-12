@@ -571,10 +571,6 @@ class TestOpVersioning(TestCase):
             deserializer._validate_model_opset_version(model_opset_version)
             self.assertIn("Compiler doesn't have a version table for op namespace", log.output[0])
 
-unittest.expectedFailure(
-    TestDeserialize.test_exportdb_supported_case_tensor_setattr
-)
-
 
 @unittest.skipIf(not torchdynamo.is_dynamo_supported(), "dynamo doesn't support")
 class TestSaveLoad(TestCase):
@@ -685,11 +681,14 @@ class TestSaveLoad(TestCase):
 @unittest.skipIf(not torchdynamo.is_dynamo_supported(), "dynamo doesn't support")
 class TestSerializeCustomClass(TestCase):
     def setUp(self):
-        if IS_SANDCASTLE or IS_MACOS or IS_FBCODE:
+        if IS_FBCODE:
+            lib_file_path = "//caffe2/test/cpp/jit:test_custom_class_registrations"
+        elif IS_SANDCASTLE or IS_MACOS:
             raise unittest.SkipTest("non-portable load_library call used in test")
-        lib_file_path = find_library_location('libtorchbind_test.so')
-        if IS_WINDOWS:
+        elif IS_WINDOWS:
             lib_file_path = find_library_location('torchbind_test.dll')
+        else:
+            lib_file_path = find_library_location('libtorchbind_test.so')
         torch.ops.load_library(str(lib_file_path))
 
     def test_custom_class(self):
