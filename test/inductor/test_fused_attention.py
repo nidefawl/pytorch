@@ -680,7 +680,9 @@ if HAS_CUDA and PLATFORM_SUPPORTS_FUSED_ATTENTION:
         test_sdpa_rewriter_14_cuda = functools.partialmethod(
             TestSDPAPatternRewriterTemplate._test_sdpa_rewriter_14
         )
-        # TODO test_sdpa_rewriter_15 for cuda failed pattern match, need to be enabled
+        test_sdpa_rewriter_15_cuda = functools.partialmethod(
+            TestSDPAPatternRewriterTemplate._test_sdpa_rewriter_15
+        )
 
 
 if HAS_CPU:
