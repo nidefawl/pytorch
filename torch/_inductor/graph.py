@@ -877,6 +877,19 @@ class GraphLowering(torch.fx.Interpreter):
                         stride_order = ir.NHWC_STRIDE_ORDER
                     result = ir.ExternKernel.require_stride_order(result, stride_order)
 
+            def has_fixed_layout_tag(user):
+                t = user.target
+                return (
+                    isinstance(result, TensorBox)
+                    and isinstance(t, torch._ops.OpOverload)
+                    and (torch._C.Tag.needs_fixed_layout in t.tags)
+                )
+
+            if any(has_fixed_layout_tag(u) for u in n.users):
+                result = ir.ExternKernel.require_stride_order(
+                    result, ir.get_stride_order(n.meta["val"].stride())
+                )
+
             # Realize if (1) any user need inputs realized, or (2) there is
             # already too many reads and rematerializing can be bad.
             num_users = len(set(n.users))
