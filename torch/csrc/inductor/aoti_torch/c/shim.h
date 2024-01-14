@@ -76,7 +76,7 @@ using AOTITorchError = int32_t;
 
 // Getter functions for retrieving various constants from the runtime, that
 // can subsequently be passed to other aoti_* functions.  By hiding these
-// behind functions, the precise value of device/dtype is NOT part of the
+// behind functions, the precise value of devie/dtype is NOT part of the
 // ABI contract.  (In practice, aten/c10 is pretty good about not renumbering
 // these, so we probably could later switch to having these in the ABI, if
 // desired for perf reasons.)
