@@ -290,6 +290,13 @@ def argmax_argmin_prefix(reduction_type, src_dtype, tmpvar):
     ]
     return prefix, parallel_prefix, worksharing_init
 
+def argmax_argmin_store(acc, compare_op, value, index):
+    stores = [
+        f"if ({acc}.value {compare_op} {value}) {{",
+        f"    {acc}.index = {cexpr_index(index)}; {acc}.value = {value};",
+        "}",
+    ]
+    return stores
 
 def parallel_num_threads():
     threads = config.cpp.threads
@@ -1407,20 +1414,12 @@ class CppKernel(Kernel):
             index = self.itervars[self.reduction_depth]
             for i in range(self.reduction_depth + 1, len(self.itervars)):
                 index = index * self.ranges[i] + self.itervars[i]
-            self.stores.writelines(
-                [
-                    f"if ({acc}.value {compare_op} {value}) {{",
-                    f"    {acc}.index = {cexpr_index(index)}; {acc}.value = {value};",
-                    "}",
-                ],
-            )
-            self.parallel_reduction_stores.writelines(
-                [
-                    f"if ({acc_local}.value {compare_op} {value}) {{",
-                    f"    {acc_local}.index = {cexpr_index(index)}; {acc_local}.value = {value};",
-                    "}",
-                ],
-            )
+            self.stores.writelines(argmax_argmin_store(acc, compare_op, value, index))
+            acc_local = f"{acc}_local"
+            nthds = parallel_num_threads()
+            acc_per_thd = f"{acc}_arr[{nthds}]"
+            acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
+            self.parallel_reduction_stores.writelines(acc_local, compare_op, value, index)
             self.parallel_reduction_suffix.writelines(
                 [
                     f"for (int tid = 0; tid < {nthds}; tid++)",
