@@ -285,13 +285,9 @@ def argmax_argmin_prefix(reduction_type, src_dtype, tmpvar):
         f"{struct_name} {tmpvar}_local{{0, {reduction_init(reduction_type, src_dtype)}}};",
     ]
     tmpvar_per_thd = f"{tmpvar}_arr[{nthds}]"
-    tmpvar_local = tmpvar_per_thd.replace(f"[{nthds}]", "[tid]")
-    parapllel_init = [
+    parallel_prefix = [
         f"{struct_name} {tmpvar_per_thd};",
-        f"for (int tid = 0; tid < {nthds}; tid++) ",
-        f"    {tmpvar_local} = {{0, {reduction_init(reduction_type, src_dtype)}}};",
     ]
-    parallel_prefix = prefix + parapllel_init
     return prefix, parallel_prefix, worksharing_init
 
 
@@ -1427,18 +1423,7 @@ class CppKernel(Kernel):
             self.worksharing_reduction_init.writeline(
                 f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
             )
-            self.parallel_reduction_prefix.writeline(
-                f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
-            )
             self.parallel_reduction_prefix.writeline(f"{acc_type} {acc_per_thd};")
-            # self.parallel_reduction_prefix.writelines(
-            #     [
-            #         f"for (int tid = 0; tid < {nthds}; tid++) ",
-            #         "{",
-            #         f"    {acc_local} = {reduction_init(reduction_type, dtype)};",
-            #         "}",
-            #     ]
-            # )
             self.parallel_reduction_stores.writelines(
                 [
                     f"{acc_local} = {reduction_combine(reduction_type, acc_local, value)};",
@@ -1543,7 +1528,7 @@ class CppKernel(Kernel):
                         else:
                             prefix = (
                                 (
-                                    kernel.parallel_reduction_prefix,
+                                    kernel.parallel_reduction_prefix + kernel.reduction_prefix,
                                     kernel.worksharing_reduction_init,
                                     kernel.worksharing_reduction_stores,
                                 )
@@ -1845,12 +1830,6 @@ class CppVecKernel(CppKernel):
             f"{acc_vec} = {reduction_combine_vec(reduction_type, acc_vec, value)};"
         )
         # parallele reduction
-        self.parallel_reduction_prefix.writeline(
-            f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
-        )
-        self.parallel_reduction_prefix.writeline(
-            f"{acc_type_vec} {acc_vec} = {reduction_init_vec(reduction_type, dtype)};"
-        )
         self.parallel_reduction_prefix.writeline(f"{acc_type} {acc_per_thd};")
         self.parallel_reduction_prefix.writeline(f"{acc_type_vec} {acc_vec_per_thd};")
         acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
@@ -1861,15 +1840,6 @@ class CppVecKernel(CppKernel):
             f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
             f"{acc_type_vec} {acc_vec_local} = {reduction_init_vec(reduction_type, dtype)};"
         )
-        # self.parallel_reduction_prefix.writelines(
-        #     [
-        #         f"for (int tid = 0; tid < {nthds}; tid++) ",
-        #         "{",
-        #         f"    {acc_local} = {reduction_init(reduction_type, dtype)};",
-        #         f"    {acc_vec_local} = {reduction_init_vec(reduction_type, dtype)};",
-        #         "}",
-        #     ]
-        # )
         self.parallel_reduction_stores.writelines(
             [
                 f"{acc_vec_local} = {reduction_combine_vec(reduction_type, acc_vec_local, value)};",
