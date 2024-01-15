@@ -1306,7 +1306,8 @@ class CppKernel(Kernel):
         self.num_threads = num_threads  # num_threads the kernel specialized for
         self.reduction_omp_dec: Dict[Tuple[str, str], str] = {}
 
-    def _gen_parallel_reduction_buffers(self, acc, acc_type, reduction_type, dtype, value, gen_store=True):
+    def _gen_parallel_reduction_buffers(self, acc, acc_type, reduction_type, dtype, value, gen_store=True, is_vec=False):
+        reduction_combine_fn = reduction_combine_vec if is_vec else reduction_combine
         acc_local = f"{acc}_local"
         num_threads = parallel_num_threads()
         acc_per_thd = f"{acc}_arr[{num_threads}]"
@@ -1318,7 +1319,7 @@ class CppKernel(Kernel):
         if gen_store:
             self.parallel_reduction_stores.writelines(
                 [
-                    f"{acc_local} = {reduction_combine(reduction_type, acc_local, value)};",
+                    f"{acc_local} = {reduction_combine_fn(reduction_type, acc_local, value)};",
                 ]
             )
         self.worksharing_reduction_stores.writelines(
@@ -1330,7 +1331,7 @@ class CppKernel(Kernel):
             [
                 f"for (int tid = 0; tid < {num_threads}; tid++)",
                 "{",
-                f"    {acc} = {reduction_combine(reduction_type, acc, acc_local_in_array)};",
+                f"    {acc} = {reduction_combine_fn(reduction_type, acc, acc_local_in_array)};",
                 "}",
             ],
         )
@@ -1827,8 +1828,8 @@ class CppVecKernel(CppKernel):
         self.stores.writeline(
             f"{acc_vec} = {reduction_combine_vec(reduction_type, acc_vec, value)};"
         )
-        self._gen_parallel_reduction_buffers(acc, acc_type, reduction_type, dtype, value, gen_store=False)
-        self._gen_parallel_reduction_buffers(acc_vec, acc_type_vec, reduction_type, dtype, value)
+        self._gen_parallel_reduction_buffers(acc, acc_type, reduction_type, dtype, value, gen_store=False, is_vec=False)
+        self._gen_parallel_reduction_buffers(acc_vec, acc_type_vec, reduction_type, dtype, value, gen_store=True, is_vec=True)
         tmpvar: Union[str, CSEVariable]
         if self.tiling_idx >= self.reduction_depth:
             # Horizontal reduction
