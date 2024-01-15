@@ -1504,18 +1504,17 @@ class CppKernel(Kernel):
                         stack.enter_context(code.indent())
                     code.splice(kernel.loads)
                     code.splice(kernel.compute)
-                    if hasattr(kernel, "parallel_prefix_suffix_used"):
-                        code.splice(kernel.parallel_reduction_stores)
-                    else:
-                        code.splice(kernel.stores)
+                    code.splice(kernel.stores)
                 if hasattr(kernel, "codegen_inner_loops"):
                     code.splice(kernel.poststores)
 
-            def get_reduction_code_buffer(loops, is_suffix=True):
+            def choose_store_buffers(loops):
                 for loop in loops:
                     if loop.parallel:
                         for kernel in loop.get_kernels():
-                            kernel.parallel_prefix_suffix_used = True
+                            kernel.stores = kernel.parallel_reduction_stores
+
+            def get_reduction_code_buffer(loops, is_suffix=True):
                 for loop in loops:
                     for kernel in loop.get_kernels():
                         if is_suffix:
@@ -1542,6 +1541,7 @@ class CppKernel(Kernel):
                     if loops:
                         loop = loops[0]
                         if loop.is_reduction and not in_reduction:
+                            choose_store_buffers(loops)
                             (
                                 reduction_prefix,
                                 ws_init,
