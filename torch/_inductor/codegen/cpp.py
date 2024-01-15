@@ -1452,9 +1452,6 @@ class CppKernel(Kernel):
         self.reduction_suffix.writeline(
             DeferredLine(name, f"{var}[{cexpr_index(index)}] = {value};")
         )
-        self.parallel_reduction_suffix.writeline(
-            DeferredLine(name, f"{var}[{cexpr_index(index)}] = {value};")
-        )
 
     def set_ranges(self, lengths, reduction_lengths):
         if self.call_ranges:
@@ -1520,7 +1517,7 @@ class CppKernel(Kernel):
                     for kernel in loop.get_kernels():
                         if is_suffix:
                             suffix = (
-                                (kernel.parallel_reduction_suffix, None, None)
+                                (kernel.parallel_reduction_suffix + kernel.reduction_suffix, None, None)
                                 if loop.parallel
                                 else (kernel.reduction_suffix, None, None)
                             )
@@ -1877,9 +1874,6 @@ class CppVecKernel(CppKernel):
             self.reduction_suffix.writeline(
                 f"{acc} = {reduction_combine(reduction_type, acc, next_value)};"
             )
-            self.parallel_reduction_suffix.writeline(
-                f"{acc} = {reduction_combine(reduction_type, acc, next_value)};"
-            )
             tmpvar = acc
         else:
             tmpvar = acc_vec
@@ -1897,12 +1891,6 @@ class CppVecKernel(CppKernel):
         if self.tiling_idx >= self.reduction_depth:
             # Horizontal reduction
             self.reduction_suffix.writeline(
-                DeferredLine(
-                    name,
-                    f"{var}[{cexpr_index(index)}] = static_cast<{DTYPE_TO_CPP[out_dtype]}>({value});",
-                )
-            )
-            self.parallel_reduction_suffix.writeline(
                 DeferredLine(
                     name,
                     f"{var}[{cexpr_index(index)}] = static_cast<{DTYPE_TO_CPP[out_dtype]}>({value});",
@@ -1932,7 +1920,6 @@ class CppVecKernel(CppKernel):
                 )
             ]
             self.reduction_suffix.writelines(store_lines)
-            self.parallel_reduction_suffix.writelines(store_lines)
 
     def broadcast(self, scalar_var: CppCSEVariable):
         assert (
