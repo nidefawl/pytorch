@@ -272,7 +272,7 @@ index_value_name_counter = 1
 
 def argmax_argmin_prefix(reduction_type, src_dtype, tmpvar):
     global index_value_name_counter
-    nthds = parallel_num_threads()
+    num_threads = parallel_num_threads()
     struct_name = f"IndexValue_{index_value_name_counter}"
     index_value_name_counter += 1
 
@@ -284,7 +284,7 @@ def argmax_argmin_prefix(reduction_type, src_dtype, tmpvar):
     worksharing_init = [
         f"{struct_name} {tmpvar}_local{{0, {reduction_init(reduction_type, src_dtype)}}};",
     ]
-    tmpvar_per_thd = f"{tmpvar}_arr[{nthds}]"
+    tmpvar_per_thd = f"{tmpvar}_arr[{num_threads}]"
     parallel_prefix = [
         f"{struct_name} {tmpvar_per_thd};",
     ]
@@ -1308,9 +1308,9 @@ class CppKernel(Kernel):
 
     def _gen_parallel_reduction_buffers(self, acc, acc_type, reduction_type, dtype, value, gen_store=True):
         acc_local = f"{acc}_local"
-        nthds = parallel_num_threads()
-        acc_per_thd = f"{acc}_arr[{nthds}]"
-        acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
+        num_threads = parallel_num_threads()
+        acc_per_thd = f"{acc}_arr[{num_threads}]"
+        acc_local_in_array = acc_per_thd.replace(f"[{num_threads}]", "[tid]")
         self.worksharing_reduction_init.writeline(
             f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
         )
@@ -1328,7 +1328,7 @@ class CppKernel(Kernel):
         )
         self.parallel_reduction_suffix.writelines(
             [
-                f"for (int tid = 0; tid < {nthds}; tid++)",
+                f"for (int tid = 0; tid < {num_threads}; tid++)",
                 "{",
                 f"    {acc} = {reduction_combine(reduction_type, acc, acc_local_in_array)};",
                 "}",
@@ -1416,13 +1416,13 @@ class CppKernel(Kernel):
                 index = index * self.ranges[i] + self.itervars[i]
             self.stores.writelines(argmax_argmin_store(acc, compare_op, value, index))
             acc_local = f"{acc}_local"
-            nthds = parallel_num_threads()
-            acc_per_thd = f"{acc}_arr[{nthds}]"
-            acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
+            num_threads = parallel_num_threads()
+            acc_per_thd = f"{acc}_arr[{num_threads}]"
+            acc_local_in_array = acc_per_thd.replace(f"[{num_threads}]", "[tid]")
             self.parallel_reduction_stores.writelines(acc_local, compare_op, value, index)
             self.parallel_reduction_suffix.writelines(
                 [
-                    f"for (int tid = 0; tid < {nthds}; tid++)",
+                    f"for (int tid = 0; tid < {num_threads}; tid++)",
                     "{",
                     f"    if ({acc}.value {compare_op} {acc_local_in_array}.value) {{",
                     f"        {acc}.index = {acc_local_in_array}.index; {acc}.value = {acc_local_in_array}.value;",
