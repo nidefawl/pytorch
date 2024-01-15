@@ -1299,6 +1299,35 @@ class CppKernel(Kernel):
         self.num_threads = num_threads  # num_threads the kernel specialized for
         self.reduction_omp_dec: Dict[Tuple[str, str], str] = {}
 
+    def _gen_parallel_reduction_buffers(self, acc, acc_type, reduction_type, dtype, value, gen_store=True):
+        acc_local = f"{acc}_local"
+        nthds = parallel_num_threads()
+        acc_per_thd = f"{acc}_arr[{nthds}]"
+        acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
+        self.worksharing_reduction_init.writeline(
+            f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
+        )
+        self.parallel_reduction_prefix.writeline(f"{acc_type} {acc_per_thd};")
+        if gen_store:
+            self.parallel_reduction_stores.writelines(
+                [
+                    f"{acc_local} = {reduction_combine(reduction_type, acc_local, value)};",
+                ]
+            )
+        self.worksharing_reduction_stores.writelines(
+            [
+                f"{acc_local_in_array} = {acc_local};",
+            ]
+        )
+        self.parallel_reduction_suffix.writelines(
+            [
+                f"for (int tid = 0; tid < {nthds}; tid++)",
+                "{",
+                f"    {acc} = {reduction_combine(reduction_type, acc, acc_local_in_array)};",
+                "}",
+            ],
+        )
+
     @contextlib.contextmanager
     def masked(self, mask):
         """Context manager to add an additional mask to loads and stores."""
@@ -1365,10 +1394,6 @@ class CppKernel(Kernel):
         acc = self.reduction_cse.generate(
             self.loads, f"reduction {reduction_key}", write=False
         )
-        acc_local = f"{acc}_local"
-        nthds = parallel_num_threads()
-        acc_per_thd = f"{acc}_arr[{nthds}]"
-        acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
         self.reduction_var_map[acc] = reduction_type
         if argmax_or_argmin:
             prefix, parallel_prefix, worksharing_init = argmax_argmin_prefix(
@@ -1420,28 +1445,7 @@ class CppKernel(Kernel):
             self.stores.writeline(
                 f"{acc} = {reduction_combine(reduction_type, acc, value)};"
             )
-            self.worksharing_reduction_init.writeline(
-                f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
-            )
-            self.parallel_reduction_prefix.writeline(f"{acc_type} {acc_per_thd};")
-            self.parallel_reduction_stores.writelines(
-                [
-                    f"{acc_local} = {reduction_combine(reduction_type, acc_local, value)};",
-                ]
-            )
-            self.worksharing_reduction_stores.writelines(
-                [
-                    f"{acc_local_in_array} = {acc_local};",
-                ]
-            )
-            self.parallel_reduction_suffix.writelines(
-                [
-                    f"for (int tid = 0; tid < {nthds}; tid++)",
-                    "{",
-                    f"    {acc} = {reduction_combine(reduction_type, acc, acc_local_in_array)};",
-                    "}",
-                ],
-            )
+            self._gen_parallel_reduction_buffers(acc, acc_type, reduction_type, dtype, value)
         result = reduction_project(reduction_type, acc)
         self.reduction_cse.reduction_cache[reduction_key] = result
         return result
@@ -1797,11 +1801,6 @@ class CppVecKernel(CppKernel):
         assert src_dtype == torch.float
         assert isinstance(value, CppCSEVariable) and value.is_vec, value
 
-        vec_ns = "at::vec"
-        vec = f"{vec_ns}::Vectorized<{DTYPE_TO_CPP[dtype]}>"
-        acc_type = reduction_acc_type(reduction_type, dtype)
-        acc_type_vec = reduction_acc_type_vec(reduction_type, dtype)
-
         reduction_key = src_dtype, reduction_type, value
         if reduction_key in self.reduction_cse.reduction_cache:
             return self.reduction_cse.reduction_cache[reduction_key]
@@ -1809,13 +1808,17 @@ class CppVecKernel(CppKernel):
         sync_stores_to_parallel_reduction_stores(
             self.stores, self.parallel_reduction_stores
         )
+
+        vec_ns = "at::vec"
+        vec = f"{vec_ns}::Vectorized<{DTYPE_TO_CPP[dtype]}>"
+        acc_type = reduction_acc_type(reduction_type, dtype)
+        acc_type_vec = reduction_acc_type_vec(reduction_type, dtype)
+
         acc = self.reduction_cse.generate(
             self.loads, f"reduction {reduction_key}", write=False
         )
         acc_vec = f"{acc}_vec"
         nthds = parallel_num_threads()
-        acc_per_thd = f"{acc}_arr[{nthds}]"
-        acc_vec_per_thd = f"{acc}_vec_arr[{nthds}]"
         self.reduction_var_map[acc_vec] = reduction_type
         self.reduction_prefix.writeline(
             f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
@@ -1826,37 +1829,8 @@ class CppVecKernel(CppKernel):
         self.stores.writeline(
             f"{acc_vec} = {reduction_combine_vec(reduction_type, acc_vec, value)};"
         )
-        # parallele reduction
-        self.parallel_reduction_prefix.writeline(f"{acc_type} {acc_per_thd};")
-        self.parallel_reduction_prefix.writeline(f"{acc_type_vec} {acc_vec_per_thd};")
-        acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
-        acc_vec_local_in_array = acc_vec_per_thd.replace(f"[{nthds}]", "[tid]")
-        acc_local = f"{acc}_local"
-        acc_vec_local = f"{acc_vec}_local"
-        self.worksharing_reduction_init.writeline(
-            f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
-            f"{acc_type_vec} {acc_vec_local} = {reduction_init_vec(reduction_type, dtype)};"
-        )
-        self.parallel_reduction_stores.writelines(
-            [
-                f"{acc_vec_local} = {reduction_combine_vec(reduction_type, acc_vec_local, value)};",
-            ]
-        )
-        self.worksharing_reduction_stores.writelines(
-            [
-                f"{acc_local_in_array} = {acc_local};",
-                f"{acc_vec_local_in_array} = {acc_vec_local};",
-            ]
-        )
-        self.parallel_reduction_suffix.writelines(
-            [
-                f"for (int tid = 0; tid < {nthds}; tid++)",
-                "{",
-                f"    {acc} = {reduction_combine(reduction_type, acc, acc_local_in_array)};",
-                f"    {acc_vec} = {reduction_combine_vec(reduction_type, acc_vec, acc_vec_local_in_array)};",
-                "}",
-            ],
-        )
+        self._gen_parallel_reduction_buffers(acc, acc_type, reduction_type, dtype, value, gen_store=False)
+        self._gen_parallel_reduction_buffers(acc_vec, acc_type_vec, reduction_type, dtype, value)
         tmpvar: Union[str, CSEVariable]
         if self.tiling_idx >= self.reduction_depth:
             # Horizontal reduction
