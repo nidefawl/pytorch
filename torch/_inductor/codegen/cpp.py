@@ -174,6 +174,14 @@ def reduction_init(reduction_type, dtype):
     raise AssertionError(reduction_type)
 
 
+def sync_stores_to_parallel_reduction_stores(
+    store_bufer, parallel_reduction_stores_buffer
+):
+    for line in store_bufer._lines:
+        if isinstance(line, DeferredLine):
+            parallel_reduction_stores_buffer.writeline(line)
+
+
 def reduction_init_vec(reduction_type, dtype):
     scalar_type = DTYPE_TO_CPP[DTYPE_TO_COMPUTATION_DTYPE[dtype]]
     vec_type = f"at::vec::Vectorized<{scalar_type}>"
@@ -264,6 +272,7 @@ index_value_name_counter = 1
 
 def argmax_argmin_prefix(reduction_type, src_dtype, tmpvar):
     global index_value_name_counter
+    nthds = parallel_num_threads()
     struct_name = f"IndexValue_{index_value_name_counter}"
     index_value_name_counter += 1
 
@@ -272,29 +281,18 @@ def argmax_argmin_prefix(reduction_type, src_dtype, tmpvar):
         f"struct {struct_name} {{size_t index; {DTYPE_TO_CPP[src_dtype]} value;}};",
         f"{struct_name} {tmpvar}{{0, {reduction_init(reduction_type, src_dtype)}}};",
     ]
-    if reduction_type == "argmax":
-        prefix.extend(
-            [
-                "#if !defined(__clang_major__) || __clang_major__ > 9",
-                f"#pragma omp declare reduction(argmax : {struct_name} :\\",
-                "    omp_out.value = omp_in.value < omp_out.value ? omp_out.value : omp_in.value,\\",
-                "    omp_out.index = omp_in.value < omp_out.value ? omp_out.index : omp_in.index)\\",
-                f"\tinitializer(omp_priv = {{0, {reduction_init(reduction_type, src_dtype)}}})",
-                "#endif",
-            ]
-        )
-    elif reduction_type == "argmin":
-        prefix.extend(
-            [
-                "#if !defined(__clang_major__) || __clang_major__ > 9",
-                f"#pragma omp declare reduction(argmin : {struct_name} :\\",
-                "    omp_out.value = omp_in.value > omp_out.value ? omp_out.value : omp_in.value,\\",
-                "    omp_out.index = omp_in.value > omp_out.value ? omp_out.index : omp_in.index)\\",
-                f"\tinitializer(omp_priv = {{0, {reduction_init(reduction_type, src_dtype)}}})",
-                "#endif",
-            ]
-        )
-    return prefix
+    worksharing_init = [
+        f"{struct_name} {tmpvar}_local{{0, {reduction_init(reduction_type, src_dtype)}}};",
+    ]
+    tmpvar_per_thd = f"{tmpvar}_arr[{nthds}]"
+    tmpvar_local = tmpvar_per_thd.replace(f"[{nthds}]", "[tid]")
+    parapllel_init = [
+        f"{struct_name} {tmpvar_per_thd};",
+        f"for (int tid = 0; tid < {nthds}; tid++) ",
+        f"    {tmpvar_local} = {{0, {reduction_init(reduction_type, src_dtype)}}};",
+    ]
+    parallel_prefix = prefix + parapllel_init
+    return prefix, parallel_prefix, worksharing_init
 
 
 def parallel_num_threads():
@@ -1293,6 +1291,11 @@ class CppKernel(Kernel):
         self.reduction_depth = None
         self.reduction_prefix = IndentedBuffer()
         self.reduction_suffix = IndentedBuffer()
+        self.parallel_reduction_prefix = IndentedBuffer()
+        self.parallel_reduction_suffix = IndentedBuffer()
+        self.parallel_reduction_stores = IndentedBuffer()
+        self.worksharing_reduction_init = IndentedBuffer()
+        self.worksharing_reduction_stores = IndentedBuffer()
         self.reduction_var_map = {}
         self.reduction_cse = CSE(self.newvar_prefix, self.suffix, name_prefix="tmp_acc")
         self.preloads = IndentedBuffer()
@@ -1360,14 +1363,24 @@ class CppKernel(Kernel):
         if reduction_key in self.reduction_cse.reduction_cache:
             return self.reduction_cse.reduction_cache[reduction_key]
 
+        sync_stores_to_parallel_reduction_stores(
+            self.stores, self.parallel_reduction_stores
+        )
         acc = self.reduction_cse.generate(
             self.loads, f"reduction {reduction_key}", write=False
         )
+        acc_local = f"{acc}_local"
+        nthds = parallel_num_threads()
+        acc_per_thd = f"{acc}_arr[{nthds}]"
+        acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
         self.reduction_var_map[acc] = reduction_type
         if argmax_or_argmin:
-            self.reduction_prefix.writelines(
-                argmax_argmin_prefix(reduction_type, src_dtype, acc)
+            prefix, parallel_prefix, worksharing_init = argmax_argmin_prefix(
+                reduction_type, src_dtype, acc
             )
+            self.worksharing_reduction_init.writelines(worksharing_init)
+            self.reduction_prefix.writelines(prefix)
+            self.parallel_reduction_prefix.writelines(parallel_prefix)
             compare_op = "<" if reduction_type == "argmax" else ">"
             assert self.reduction_depth is not None
             index = self.itervars[self.reduction_depth]
@@ -1380,23 +1393,30 @@ class CppKernel(Kernel):
                     "}",
                 ],
             )
+            self.parallel_reduction_stores.writelines(
+                [
+                    f"if ({acc_local}.value {compare_op} {value}) {{",
+                    f"    {acc_local}.index = {cexpr_index(index)}; {acc_local}.value = {value};",
+                    "}",
+                ],
+            )
+            self.parallel_reduction_suffix.writelines(
+                [
+                    f"for (int tid = 0; tid < {nthds}; tid++)",
+                    "{",
+                    f"    if ({acc}.value {compare_op} {acc_local_in_array}.value) {{",
+                    f"        {acc}.index = {acc_local_in_array}.index; {acc}.value = {acc_local_in_array}.value;",
+                    "    }",
+                    "}",
+                ],
+            )
+            self.worksharing_reduction_stores.writelines(
+                [
+                    f"{acc_local_in_array} = {acc_local};",
+                ]
+            )
         else:
             acc_type = reduction_acc_type(reduction_type, dtype)
-
-            if (reduction_type, acc_type) not in self.reduction_omp_dec:
-                if RTYPE_TO_CPP[reduction_type] not in NATIVE_OMP_RTYPES:
-                    # Scalar reduction for other reductions are declared by default
-                    self.reduction_prefix.splice(
-                        f"""\
-    #pragma omp declare reduction(\
-    {RTYPE_TO_CPP[reduction_type]}:{acc_type}:\
-    omp_out = {reduction_combine(reduction_type, "omp_out", "omp_in")}) \
-    initializer(omp_priv={{{reduction_init(reduction_type, dtype)}}})
-                """
-                    )
-                self.reduction_omp_dec[reduction_type, acc_type] = RTYPE_TO_CPP[
-                    reduction_type
-                ]
 
             self.reduction_prefix.writeline(
                 f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
@@ -1404,7 +1424,39 @@ class CppKernel(Kernel):
             self.stores.writeline(
                 f"{acc} = {reduction_combine(reduction_type, acc, value)};"
             )
-
+            self.worksharing_reduction_init.writeline(
+                f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
+            )
+            self.parallel_reduction_prefix.writeline(
+                f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
+            )
+            self.parallel_reduction_prefix.writeline(f"{acc_type} {acc_per_thd};")
+            # self.parallel_reduction_prefix.writelines(
+            #     [
+            #         f"for (int tid = 0; tid < {nthds}; tid++) ",
+            #         "{",
+            #         f"    {acc_local} = {reduction_init(reduction_type, dtype)};",
+            #         "}",
+            #     ]
+            # )
+            self.parallel_reduction_stores.writelines(
+                [
+                    f"{acc_local} = {reduction_combine(reduction_type, acc_local, value)};",
+                ]
+            )
+            self.worksharing_reduction_stores.writelines(
+                [
+                    f"{acc_local_in_array} = {acc_local};",
+                ]
+            )
+            self.parallel_reduction_suffix.writelines(
+                [
+                    f"for (int tid = 0; tid < {nthds}; tid++)",
+                    "{",
+                    f"    {acc} = {reduction_combine(reduction_type, acc, acc_local_in_array)};",
+                    "}",
+                ],
+            )
         result = reduction_project(reduction_type, acc)
         self.reduction_cse.reduction_cache[reduction_key] = result
         return result
@@ -1413,6 +1465,9 @@ class CppKernel(Kernel):
         index = self.rename_indexing(index)
         var = self.args.output(name)
         self.reduction_suffix.writeline(
+            DeferredLine(name, f"{var}[{cexpr_index(index)}] = {value};")
+        )
+        self.parallel_reduction_suffix.writeline(
             DeferredLine(name, f"{var}[{cexpr_index(index)}] = {value};")
         )
 
@@ -1464,27 +1519,53 @@ class CppKernel(Kernel):
                         stack.enter_context(code.indent())
                     code.splice(kernel.loads)
                     code.splice(kernel.compute)
-                    code.splice(kernel.stores)
+                    if hasattr(kernel, "parallel_prefix_suffix_used"):
+                        code.splice(kernel.parallel_reduction_stores)
+                    else:
+                        code.splice(kernel.stores)
                 if hasattr(kernel, "codegen_inner_loops"):
                     code.splice(kernel.poststores)
 
             def get_reduction_code_buffer(loops, is_suffix=True):
                 for loop in loops:
+                    if loop.parallel:
+                        for kernel in loop.get_kernels():
+                            kernel.parallel_prefix_suffix_used = True
+                for loop in loops:
                     for kernel in loop.get_kernels():
                         if is_suffix:
-                            return kernel.reduction_suffix
+                            suffix = (
+                                (kernel.parallel_reduction_suffix, None, None)
+                                if loop.parallel
+                                else (kernel.reduction_suffix, None, None)
+                            )
+                            return suffix
                         else:
-                            return kernel.reduction_prefix
-                return None
+                            prefix = (
+                                (
+                                    kernel.parallel_reduction_prefix,
+                                    kernel.worksharing_reduction_init,
+                                    kernel.worksharing_reduction_stores,
+                                )
+                                if loop.parallel
+                                else (kernel.reduction_prefix, None, None)
+                            )
+                            return prefix
 
             def gen_loops(loops: List[LoopLevel], in_reduction=False):
                 with contextlib.ExitStack() as stack_outer:
                     if loops:
                         loop = loops[0]
                         if loop.is_reduction() and not in_reduction:
-                            reduction_prefix = get_reduction_code_buffer(
-                                loops, is_suffix=False
-                            )
+                            (
+                                reduction_prefix,
+                                ws_init,
+                                ws_tores,
+                            ) = get_reduction_code_buffer(loops, is_suffix=False)
+                            if ws_init:
+                                assert ws_tores
+                                worksharing.reduction_init = ws_init
+                                worksharing.reduction_stores = ws_tores
                             if reduction_prefix:
                                 stack_outer.enter_context(code.indent())
                             code.splice(reduction_prefix)
@@ -1500,7 +1581,7 @@ class CppKernel(Kernel):
                             worksharing.close()
                         if loop.is_reduction() and not in_reduction:
                             code.splice(
-                                get_reduction_code_buffer(loops, is_suffix=True)
+                                get_reduction_code_buffer(loops, is_suffix=True)[0]
                             )
 
             def gen_loop(loop: LoopLevel, in_reduction=False):
@@ -1739,43 +1820,20 @@ class CppVecKernel(CppKernel):
         acc_type = reduction_acc_type(reduction_type, dtype)
         acc_type_vec = reduction_acc_type_vec(reduction_type, dtype)
 
-        if (reduction_type, acc_type) not in self.reduction_omp_dec:
-            if RTYPE_TO_CPP[reduction_type] not in NATIVE_OMP_RTYPES:
-                # Scalar reduction for other reductions are declared by default
-                self.reduction_prefix.splice(
-                    f"""\
-#pragma omp declare reduction(\
-{RTYPE_TO_CPP[reduction_type]}:{acc_type}:\
-omp_out = {reduction_combine(reduction_type, "omp_out", "omp_in")}) \
-initializer(omp_priv={{{reduction_init(reduction_type, dtype)}}})
-            """
-                )
-            self.reduction_omp_dec[reduction_type, acc_type] = RTYPE_TO_CPP[
-                reduction_type
-            ]
-
-        if (reduction_type, acc_type_vec) not in self.reduction_omp_dec:
-            self.reduction_prefix.splice(
-                f"""\
-#pragma omp declare reduction(\
-{RTYPE_TO_CPP[reduction_type]}:{acc_type_vec}:\
-omp_out = {reduction_combine_vec(reduction_type, "omp_out", "omp_in")}) \
-initializer(omp_priv={{{reduction_init_vec(reduction_type, dtype)}}})
-            """
-            )
-            self.reduction_omp_dec[reduction_type, acc_type_vec] = RTYPE_TO_CPP[
-                reduction_type
-            ]
-
         reduction_key = src_dtype, reduction_type, value
         if reduction_key in self.reduction_cse.reduction_cache:
             return self.reduction_cse.reduction_cache[reduction_key]
 
+        sync_stores_to_parallel_reduction_stores(
+            self.stores, self.parallel_reduction_stores
+        )
         acc = self.reduction_cse.generate(
             self.loads, f"reduction {reduction_key}", write=False
         )
         acc_vec = f"{acc}_vec"
-
+        nthds = parallel_num_threads()
+        acc_per_thd = f"{acc}_arr[{nthds}]"
+        acc_vec_per_thd = f"{acc}_vec_arr[{nthds}]"
         self.reduction_var_map[acc_vec] = reduction_type
         self.reduction_prefix.writeline(
             f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
@@ -1786,7 +1844,52 @@ initializer(omp_priv={{{reduction_init_vec(reduction_type, dtype)}}})
         self.stores.writeline(
             f"{acc_vec} = {reduction_combine_vec(reduction_type, acc_vec, value)};"
         )
-
+        # parallele reduction
+        self.parallel_reduction_prefix.writeline(
+            f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
+        )
+        self.parallel_reduction_prefix.writeline(
+            f"{acc_type_vec} {acc_vec} = {reduction_init_vec(reduction_type, dtype)};"
+        )
+        self.parallel_reduction_prefix.writeline(f"{acc_type} {acc_per_thd};")
+        self.parallel_reduction_prefix.writeline(f"{acc_type_vec} {acc_vec_per_thd};")
+        acc_local_in_array = acc_per_thd.replace(f"[{nthds}]", "[tid]")
+        acc_vec_local_in_array = acc_vec_per_thd.replace(f"[{nthds}]", "[tid]")
+        acc_local = f"{acc}_local"
+        acc_vec_local = f"{acc_vec}_local"
+        self.worksharing_reduction_init.writeline(
+            f"{acc_type} {acc_local} = {reduction_init(reduction_type, dtype)};"
+            f"{acc_type_vec} {acc_vec_local} = {reduction_init_vec(reduction_type, dtype)};"
+        )
+        # self.parallel_reduction_prefix.writelines(
+        #     [
+        #         f"for (int tid = 0; tid < {nthds}; tid++) ",
+        #         "{",
+        #         f"    {acc_local} = {reduction_init(reduction_type, dtype)};",
+        #         f"    {acc_vec_local} = {reduction_init_vec(reduction_type, dtype)};",
+        #         "}",
+        #     ]
+        # )
+        self.parallel_reduction_stores.writelines(
+            [
+                f"{acc_vec_local} = {reduction_combine_vec(reduction_type, acc_vec_local, value)};",
+            ]
+        )
+        self.worksharing_reduction_stores.writelines(
+            [
+                f"{acc_local_in_array} = {acc_local};",
+                f"{acc_vec_local_in_array} = {acc_vec_local};",
+            ]
+        )
+        self.parallel_reduction_suffix.writelines(
+            [
+                f"for (int tid = 0; tid < {nthds}; tid++)",
+                "{",
+                f"    {acc} = {reduction_combine(reduction_type, acc, acc_local_in_array)};",
+                f"    {acc_vec} = {reduction_combine_vec(reduction_type, acc_vec, acc_vec_local_in_array)};",
+                "}",
+            ],
+        )
         tmpvar: Union[str, CSEVariable]
         if self.tiling_idx >= self.reduction_depth:
             # Horizontal reduction
@@ -1802,6 +1905,9 @@ initializer(omp_priv={{{reduction_init_vec(reduction_type, dtype)}}})
                 next_value = f"{vec_reduce_all_func}([]({vec}& x, {vec}& y) {reduce_all_body}, {acc_vec})"
 
             self.reduction_suffix.writeline(
+                f"{acc} = {reduction_combine(reduction_type, acc, next_value)};"
+            )
+            self.parallel_reduction_suffix.writeline(
                 f"{acc} = {reduction_combine(reduction_type, acc, next_value)};"
             )
             tmpvar = acc
@@ -1821,6 +1927,12 @@ initializer(omp_priv={{{reduction_init_vec(reduction_type, dtype)}}})
         if self.tiling_idx >= self.reduction_depth:
             # Horizontal reduction
             self.reduction_suffix.writeline(
+                DeferredLine(
+                    name,
+                    f"{var}[{cexpr_index(index)}] = static_cast<{DTYPE_TO_CPP[out_dtype]}>({value});",
+                )
+            )
+            self.parallel_reduction_suffix.writeline(
                 DeferredLine(
                     name,
                     f"{var}[{cexpr_index(index)}] = static_cast<{DTYPE_TO_CPP[out_dtype]}>({value});",
@@ -1850,6 +1962,7 @@ initializer(omp_priv={{{reduction_init_vec(reduction_type, dtype)}}})
                 )
             ]
             self.reduction_suffix.writelines(store_lines)
+            self.parallel_reduction_suffix.writelines(store_lines)
 
     def broadcast(self, scalar_var: CppCSEVariable):
         assert (
@@ -3120,6 +3233,8 @@ class WorkSharing:
         self.code = code
         self.in_parallel = False
         self.num_threads = None
+        self.reduction_init = IndentedBuffer()
+        self.reduction_stores = IndentedBuffer()
         self.stack = contextlib.ExitStack()
 
     def parallel(self, threads):
@@ -3134,6 +3249,11 @@ class WorkSharing:
             else:
                 self.code.writeline(f"#pragma omp parallel num_threads({threads})")
             self.stack.enter_context(self.code.indent())
+            self.code.writeline(
+                "int tid = omp_get_thread_num();",
+            )
+            self.code.splice(self.reduction_init)
+            self.reduction_init = IndentedBuffer()
 
     def single(self):
         if self.in_parallel:
@@ -3141,6 +3261,8 @@ class WorkSharing:
         return self.in_parallel
 
     def close(self):
+        self.code.splice(self.reduction_stores)
+        self.reduction_stores = IndentedBuffer()
         self.stack.close()
         self.in_parallel = False
 
@@ -3285,13 +3407,6 @@ class LoopLevel:
         size_expr = cexpr_index(self.size)
         if config.cpp.no_redundant_loops and offset_expr == size_expr:
             return None
-        if self.reduction_var_map:
-            reduction = " " + " ".join(
-                f"reduction({RTYPE_TO_CPP[rtype]}:{var})"
-                for var, rtype in self.reduction_var_map.items()
-            )
-        else:
-            reduction = ""
         simd = (
             f"simd simdlen({self.simd_nelements}) "
             if self.simd_omp and self.simd_nelements > 1
@@ -3299,7 +3414,7 @@ class LoopLevel:
         )
         if self.parallel:
             # TODO(jansel): look into chunk size and other schedules
-            line1 = f"#pragma omp for{reduction} "
+            line1 = "#pragma omp for"
             if self.parallel > 1:
                 line1 += f" collapse({self.parallel})"
             if self.simd_omp:
@@ -3307,7 +3422,7 @@ class LoopLevel:
         elif self.simd_vec:
             line1 = ""
         elif self.simd_omp:
-            line1 = f"#pragma omp {simd}{reduction}"
+            line1 = f"#pragma omp {simd}"
         elif not self.reduction_var_map and codecache.is_gcc():
             line1 = "#pragma GCC ivdep"
         else:
