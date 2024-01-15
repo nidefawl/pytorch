@@ -1419,7 +1419,7 @@ class CppKernel(Kernel):
             num_threads = parallel_num_threads()
             acc_per_thd = f"{acc}_arr[{num_threads}]"
             acc_local_in_array = acc_per_thd.replace(f"[{num_threads}]", "[tid]")
-            self.parallel_reduction_stores.writelines(acc_local, compare_op, value, index)
+            self.parallel_reduction_stores.writelines(argmax_argmin_store(acc_local, compare_op, value, index))
             self.parallel_reduction_suffix.writelines(
                 [
                     f"for (int tid = 0; tid < {num_threads}; tid++)",
@@ -1527,7 +1527,7 @@ class CppKernel(Kernel):
                         else:
                             prefix = (
                                 (
-                                    kernel.parallel_reduction_prefix + kernel.reduction_prefix,
+                                    kernel.reduction_prefix + kernel.parallel_reduction_prefix,
                                     kernel.worksharing_reduction_init,
                                     kernel.worksharing_reduction_stores,
                                 )
