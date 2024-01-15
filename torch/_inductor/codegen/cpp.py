@@ -1299,7 +1299,7 @@ class CppKernel(Kernel):
         self.parallel_reduction_stores = IndentedBuffer()
         self.worksharing_reduction_init = IndentedBuffer()
         self.worksharing_reduction_stores = IndentedBuffer()
-        self.is_reduction = False
+        self.reduction_var_map = {}
         self.reduction_cse = CSE(self.newvar_prefix, self.suffix, name_prefix="tmp_acc")
         self.preloads = IndentedBuffer()
         self.poststores = IndentedBuffer()
@@ -1401,7 +1401,7 @@ class CppKernel(Kernel):
         acc = self.reduction_cse.generate(
             self.loads, f"reduction {reduction_key}", write=False
         )
-        self.is_reduction = True
+        self.reduction_var_map[acc] = reduction_type
         if argmax_or_argmin:
             prefix, parallel_prefix, worksharing_init = argmax_argmin_prefix(
                 reduction_type, src_dtype, acc
@@ -1540,7 +1540,7 @@ class CppKernel(Kernel):
                 with contextlib.ExitStack() as stack_outer:
                     if loops:
                         loop = loops[0]
-                        if loop.is_reduction and not in_reduction:
+                        if loop.is_reduction() and not in_reduction:
                             choose_store_buffers(loops)
                             (
                                 reduction_prefix,
@@ -1564,7 +1564,7 @@ class CppKernel(Kernel):
                         loop = loops[0]
                         if loop_nest.is_reduction_only() and loop.parallel:
                             worksharing.close()
-                        if loop.is_reduction and not in_reduction:
+                        if loop.is_reduction() and not in_reduction:
                             code.splice(
                                 get_reduction_code_buffer(loops, is_suffix=True)[0]
                             )
@@ -1578,7 +1578,7 @@ class CppKernel(Kernel):
                     stack.enter_context(code.indent())
                     # generate inner loops or loop body
                     if loop.inner:
-                        gen_loops(loop.inner, loop.is_reduction)
+                        gen_loops(loop.inner, loop.is_reduction())
                     else:
                         kernels = loop.get_kernels()
                         assert len(kernels) == 1
@@ -1817,7 +1817,8 @@ class CppVecKernel(CppKernel):
             self.loads, f"reduction {reduction_key}", write=False
         )
         acc_vec = f"{acc}_vec"
-        self.is_reduction = True
+        nthds = parallel_num_threads()
+        self.reduction_var_map[acc_vec] = reduction_type
         self.reduction_prefix.writeline(
             f"{acc_type} {acc} = {reduction_init(reduction_type, dtype)};"
         )
@@ -3213,7 +3214,7 @@ class LoopLevel:
     simd_omp: bool = False
     simd_vec: bool = False
     collapsed: bool = False
-    is_reduction: bool = False
+    reduction_var_map: Optional[Dict[str, str]] = None
     parent: Optional["LoopLevel"] = None
     # the next inner level of the loop, empty if it is inner-most
     # contains >1 LoopLevel if the inner level of loop is split
@@ -3251,6 +3252,13 @@ class LoopLevel:
             self.kernel = kernel
             loop: Optional[LoopLevel] = self
             assert loop is not None
+            if loop.is_reduction():
+                loop.reduction_var_map = kernel.reduction_var_map.copy()
+                loop = loop.parent
+                while loop is not None and loop.is_reduction():
+                    assert loop.reduction_var_map is not None
+                    loop.reduction_var_map.update(kernel.reduction_var_map)
+                    loop = loop.parent
             return
         assert len(self.inner) == 1
         self.inner[0].set_kernel(kernel)
@@ -3265,7 +3273,7 @@ class LoopLevel:
             return loops
 
     def is_reduction(self):
-        return self.is_reduction
+        return bool(self.reduction_var_map)
 
     def split_with_tiling(self, depth, factor):
         def clone_inner():
@@ -3283,7 +3291,7 @@ class LoopLevel:
             main_loop.steps = sympy_factor
             main_loop.parallel = self.parallel
             main_loop.collapsed = False
-            main_loop.is_reduction = self.is_reduction
+            main_loop.reduction_var_map = self.reduction_var_map
             main_loop.inner = clone_inner()
             if main_loop.inner:
                 for loop in main_loop.inner:
@@ -3293,7 +3301,7 @@ class LoopLevel:
             tail_loop.offset = offset
             tail_loop.parallel = self.parallel
             tail_loop.collapsed = False
-            tail_loop.is_reduction = self.is_reduction
+            tail_loop.reduction_var_map = self.reduction_var_map
             tail_loop.inner = clone_inner()
             if tail_loop.inner:
                 for loop in tail_loop.inner:
@@ -3345,7 +3353,7 @@ class LoopLevel:
             line1 = ""
         elif self.simd_omp:
             line1 = f"#pragma omp {simd}"
-        elif not self.is_reduction and codecache.is_gcc():
+        elif not self.reduction_var_map and codecache.is_gcc():
             line1 = "#pragma GCC ivdep"
         else:
             line1 = ""
@@ -3387,6 +3395,8 @@ class LoopNestWithSplit:
         loop: Optional[LoopLevel] = None
         for loop_idx, (var, size) in enumerate(zip(itervars, ranges)):
             loop = LoopLevel(var, size, parent=loop)
+            if loop_idx >= reduction_depth:
+                loop.reduction_var_map = kernel.reduction_var_map.copy()
             levels.append(loop)
             levels = loop.inner
         loop_nest = LoopNestWithSplit(root)
@@ -3420,8 +3430,8 @@ class LoopNestWithSplit:
         loops = self.root
         if len(loops) > 1:
             return 1
-        is_reduction = loops[0].is_reduction if loops else False
-        while len(loops) == 1 and loops[0].is_reduction == is_reduction:
+        is_reduction = loops[0].is_reduction() if loops else False
+        while len(loops) == 1 and loops[0].is_reduction() == is_reduction:
             max_depth += 1
             loops = loops[0].inner
         return max_depth
@@ -3432,7 +3442,7 @@ class LoopNestWithSplit:
         are always the inner most ones.
         """
         return (
-            self.root is not None and len(self.root) > 0 and self.root[0].is_reduction
+            self.root is not None and len(self.root) > 0 and self.root[0].is_reduction()
         )
 
     def mark_parallel(self, par_depth):
